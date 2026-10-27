@@ -1,0 +1,11 @@
+.venv/
+.DS_Store
+pdfs/
+__pycache__/
+*.pyc
+page.html
+download.log
+download_list.sh
+ms_pdf_paths.txt
+ms_pdf_urls.txt
+nsb_access.log
