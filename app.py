@@ -111,7 +111,9 @@ if "fc_order" not in st.session_state:
 if "fc_filter_key" not in st.session_state:
     st.session_state.fc_filter_key = ""
 if "quiz_history" not in st.session_state:
-    st.session_state.quiz_history = []  # list[(qid, correct_bool)]
+    # list of dicts: qid, kind, topic, subtopic, format, correct(bool),
+    # user_answer, official_answer, question (short), source, round_label, points
+    st.session_state.quiz_history = []
 if "quiz_submitted" not in st.session_state:
     st.session_state.quiz_submitted = False
 if "quiz_user_answer" not in st.session_state:
@@ -375,6 +377,21 @@ elif mode.startswith("🎴") or mode == "Flashcards":
 # =================================================================
 elif mode.startswith("✏️") or mode == "Quiz":
     import random as _rand
+    from collections import defaultdict as _dd
+
+    # NSB official points: toss-up = 4, bonus = 10
+    POINTS = {"TOSS-UP": 4, "BONUS": 10}
+
+    def _streaks(hist):
+        """Return (current, best) streaks of correct answers in history order."""
+        cur = best = 0
+        for h in hist:
+            if h["correct"]:
+                cur += 1
+                best = max(best, cur)
+            else:
+                cur = 0
+        return cur, best
 
     if not filtered:
         st.info("No questions match your filters. Loosen the filters in the sidebar.")
@@ -384,23 +401,75 @@ elif mode.startswith("✏️") or mode == "Quiz":
         r = filtered[st.session_state.fc_order[idx]]
         qid = f"{r['source']}|{r['kind']}|{r['number']}"
 
-        # score summary
-        correct = sum(1 for _, ok in st.session_state.quiz_history if ok)
-        attempted = len(st.session_state.quiz_history)
-        c_top = st.columns([2, 1, 1, 1])
-        c_top[0].markdown(f"**Question {idx + 1} / {n}** · {r['topic']} · {r.get('subtopic','')}")
-        c_top[1].metric("Correct", f"{correct}/{attempted}" if attempted else "0/0")
-        if c_top[2].button("🔀 Shuffle"):
+        # ---------- scoreboard ----------
+        hist = st.session_state.quiz_history
+        attempted = len(hist)
+        correct = sum(1 for h in hist if h["correct"])
+        points_earned = sum(h["points"] for h in hist if h["correct"])
+        points_possible = sum(POINTS.get(h["kind"], 0) for h in hist)
+        cur_streak, best_streak = _streaks(hist)
+        pct = (correct / attempted * 100) if attempted else 0.0
+
+        st.markdown(f"**Question {idx + 1} / {n}** · {r['topic']} · {r.get('subtopic','')}")
+
+        m = st.columns(5)
+        m[0].metric("Score (NSB)", f"{points_earned}", f"of {points_possible} possible" if points_possible else "0")
+        m[1].metric("Correct", f"{correct}/{attempted}", f"{pct:.0f}%" if attempted else "—")
+        m[2].metric("Current streak", f"🔥 {cur_streak}")
+        m[3].metric("Best streak", f"🏆 {best_streak}")
+        m[4].metric(
+            "This question",
+            f"{POINTS.get(r['kind'], 0)} pts",
+            r["kind"],
+            delta_color="off",
+        )
+
+        # progress bar through the deck
+        st.progress(idx / max(1, n - 1), text=f"Deck progress: {idx + 1} / {n}")
+
+        # per-topic breakdown
+        if attempted:
+            with st.expander("📊 Score breakdown by topic / sub-topic / question type"):
+                def _agg(key: str):
+                    buckets = _dd(lambda: {"c": 0, "a": 0, "pts": 0, "poss": 0})
+                    for h in hist:
+                        k = h.get(key) or "—"
+                        buckets[k]["a"] += 1
+                        buckets[k]["poss"] += POINTS.get(h["kind"], 0)
+                        if h["correct"]:
+                            buckets[k]["c"] += 1
+                            buckets[k]["pts"] += h["points"]
+                    return buckets
+
+                for label, key in [("Topic", "topic"), ("Sub-topic", "subtopic"), ("Question type", "kind"), ("Format", "format")]:
+                    buckets = _agg(key)
+                    st.markdown(f"**By {label.lower()}**")
+                    rows_md = ["| " + label + " | Correct | % | NSB pts |", "|---|---:|---:|---:|"]
+                    for k, v in sorted(buckets.items(), key=lambda x: -x[1]["c"]):
+                        p = (v["c"] / v["a"] * 100) if v["a"] else 0
+                        rows_md.append(f"| {k} | {v['c']}/{v['a']} | {p:.0f}% | {v['pts']}/{v['poss']} |")
+                    st.markdown("\n".join(rows_md))
+
+        ctl = st.columns([1, 1, 1])
+        if ctl[0].button("🔀 Shuffle deck"):
             _rand.shuffle(st.session_state.fc_order)
             st.session_state.fc_idx = 0
             st.session_state.quiz_submitted = False
             st.session_state.quiz_user_answer = None
             st.rerun()
-        if c_top[3].button("↺ Reset score"):
+        if ctl[1].button("↺ Reset score"):
             st.session_state.quiz_history = []
             st.rerun()
+        if ctl[2].button("↩️ Restart deck"):
+            st.session_state.fc_order = list(range(n))
+            st.session_state.fc_idx = 0
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_user_answer = None
+            st.rerun()
 
+        # ---------- question card ----------
         with st.container(border=True):
+            st.caption(f"{r['kind']} · {r['format']} · worth {POINTS.get(r['kind'], 0)} pts · {r.get('set_label','')} · {r.get('round_label','')}")
             if r["format"] == "Multiple Choice":
                 stem, choices = parse_mc(r["question"])
                 st.markdown(f"### {stem}")
@@ -411,28 +480,37 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     letters,
                     format_func=lambda l: labels.get(l, l),
                     key=f"quiz_mc_{qid}_{idx}",
-                    index=None if not st.session_state.quiz_submitted else letters.index(st.session_state.quiz_user_answer or letters[0]),
+                    index=(letters.index(st.session_state.quiz_user_answer)
+                           if (st.session_state.quiz_submitted and st.session_state.quiz_user_answer in letters)
+                           else None),
                 )
-                col_a, col_b = st.columns([1, 3])
-                if col_a.button(
-                    "Check answer",
+                if st.button(
+                    "✅ Check answer",
                     key=f"check_mc_{idx}",
                     disabled=picked is None or st.session_state.quiz_submitted,
                 ):
-                    st.session_state.quiz_user_answer = picked
-                    st.session_state.quiz_submitted = True
                     correct_letter = extract_correct_letter(r["answer"])
                     is_ok = picked == correct_letter
-                    st.session_state.quiz_history.append((qid, is_ok))
+                    st.session_state.quiz_user_answer = picked
+                    st.session_state.quiz_submitted = True
+                    st.session_state.quiz_history.append({
+                        "qid": qid, "kind": r["kind"], "topic": r["topic"],
+                        "subtopic": r.get("subtopic"), "format": r["format"],
+                        "correct": is_ok, "user_answer": picked,
+                        "official_answer": r["answer"],
+                        "question": r["question"][:200],
+                        "source": r["source"], "round_label": r.get("round_label"),
+                        "points": POINTS.get(r["kind"], 0) if is_ok else 0,
+                    })
                     st.rerun()
 
                 if st.session_state.quiz_submitted:
                     correct_letter = extract_correct_letter(r["answer"])
                     if st.session_state.quiz_user_answer == correct_letter:
-                        st.success(f"✅ Correct! Answer: **{r['answer']}**")
+                        st.success(f"✅ Correct! +{POINTS.get(r['kind'], 0)} pts · Answer: **{r['answer']}**")
                     else:
                         st.error(
-                            f"❌ You picked **{st.session_state.quiz_user_answer})**. "
+                            f"❌ You picked **{st.session_state.quiz_user_answer})** · "
                             f"Correct answer: **{r['answer']}**"
                         )
             else:  # Short Answer
@@ -442,26 +520,45 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     key=f"quiz_sa_{qid}_{idx}",
                     disabled=st.session_state.quiz_submitted,
                 )
-                col_a, col_b = st.columns([1, 3])
-                if col_a.button(
-                    "Check answer",
+                if st.button(
+                    "✅ Check answer",
                     key=f"check_sa_{idx}",
                     disabled=not user_in or st.session_state.quiz_submitted,
                 ):
+                    ok = is_correct_short(user_in, r["answer"])
                     st.session_state.quiz_user_answer = user_in
                     st.session_state.quiz_submitted = True
-                    ok = is_correct_short(user_in, r["answer"])
-                    st.session_state.quiz_history.append((qid, ok))
+                    st.session_state.quiz_history.append({
+                        "qid": qid, "kind": r["kind"], "topic": r["topic"],
+                        "subtopic": r.get("subtopic"), "format": r["format"],
+                        "correct": ok, "user_answer": user_in,
+                        "official_answer": r["answer"],
+                        "question": r["question"][:200],
+                        "source": r["source"], "round_label": r.get("round_label"),
+                        "points": POINTS.get(r["kind"], 0) if ok else 0,
+                    })
                     st.rerun()
 
                 if st.session_state.quiz_submitted:
                     if is_correct_short(st.session_state.quiz_user_answer or "", r["answer"]):
-                        st.success(f"✅ Correct! Official answer: **{r['answer']}**")
-                    else:
-                        st.error(
-                            f"❌ You wrote **{st.session_state.quiz_user_answer}**. "
+                        st.success(
+                            f"✅ Correct! +{POINTS.get(r['kind'], 0)} pts · "
                             f"Official answer: **{r['answer']}**"
                         )
+                    else:
+                        st.error(
+                            f"❌ You wrote **{st.session_state.quiz_user_answer}** · "
+                            f"Official answer: **{r['answer']}**"
+                        )
+                        if st.button(
+                            "I was right — give me the point",
+                            key=f"override_{idx}",
+                            help="Manual override if the fuzzy match was too strict",
+                        ):
+                            last = st.session_state.quiz_history[-1]
+                            last["correct"] = True
+                            last["points"] = POINTS.get(r["kind"], 0)
+                            st.rerun()
 
         c_bot = st.columns([1, 1, 1])
         if c_bot[0].button("⟵ Previous", disabled=idx == 0, use_container_width=True):
@@ -483,6 +580,43 @@ elif mode.startswith("✏️") or mode == "Quiz":
             st.session_state.quiz_submitted = False
             st.session_state.quiz_user_answer = None
             st.rerun()
+
+        # ---------- end-of-deck summary ----------
+        if idx == n - 1 and st.session_state.quiz_submitted:
+            st.markdown("---")
+            st.markdown("## 🏁 Deck complete!")
+            s = st.columns(4)
+            s[0].metric("Final NSB score", f"{points_earned} pts")
+            s[1].metric("Correct", f"{correct}/{attempted}")
+            s[2].metric("Accuracy", f"{pct:.0f}%")
+            s[3].metric("Best streak", f"🏆 {best_streak}")
+
+        # ---------- review wrong answers ----------
+        wrong = [h for h in hist if not h["correct"]]
+        if wrong:
+            with st.expander(f"📝 Review wrong answers ({len(wrong)})"):
+                for i, h in enumerate(wrong, 1):
+                    st.markdown(
+                        f"**{i}. [{h['topic']} · {h['kind']}]** "
+                        f"{h['question']}\n\n"
+                        f"Your answer: `{h['user_answer']}`  →  "
+                        f"Correct: **{h['official_answer']}**"
+                    )
+                    st.caption(f"from {h['source']} · {h.get('round_label','')}")
+                    st.divider()
+                # CSV export
+                import csv, io
+                buf = io.StringIO()
+                w = csv.DictWriter(buf, fieldnames=["topic","subtopic","kind","format","question","user_answer","official_answer","source","round_label"])
+                w.writeheader()
+                for h in wrong:
+                    w.writerow({k: h.get(k, "") for k in w.fieldnames})
+                st.download_button(
+                    "Download wrong answers (CSV)",
+                    buf.getvalue(),
+                    file_name="nsb_wrong_answers.csv",
+                    mime="text/csv",
+                )
 
 # ---------------------------- footer / watermark ----------------------------
 st.markdown("---")
