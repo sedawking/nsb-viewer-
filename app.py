@@ -101,6 +101,21 @@ if "seen_log" not in st.session_state:
     st.session_state.seen_log = []  # list of timestamps when questions were served
 if "reveal" not in st.session_state:
     st.session_state.reveal = {}  # id -> True
+# Flashcard / Quiz state
+if "fc_idx" not in st.session_state:
+    st.session_state.fc_idx = 0
+if "fc_flipped" not in st.session_state:
+    st.session_state.fc_flipped = False
+if "fc_order" not in st.session_state:
+    st.session_state.fc_order = []
+if "fc_filter_key" not in st.session_state:
+    st.session_state.fc_filter_key = ""
+if "quiz_history" not in st.session_state:
+    st.session_state.quiz_history = []  # list[(qid, correct_bool)]
+if "quiz_submitted" not in st.session_state:
+    st.session_state.quiz_submitted = False
+if "quiz_user_answer" not in st.session_state:
+    st.session_state.quiz_user_answer = None
 
 rows = load_rows(*_data_cache_key())
 
@@ -109,6 +124,8 @@ with st.sidebar:
     st.title("🧪 NSB MS Study")
     st.caption(f"{len(rows):,} questions across all 16 Sample Question Sets")
     st.markdown("---")
+
+    mode = st.radio("Mode", ["📖 Browse", "🎴 Flashcards", "✏️ Quiz"], horizontal=False)
 
     present_topics = ["All"] + [t for t in TOPIC_ORDER if any(r["topic"] == t for r in rows)]
     topic = st.selectbox("Topic", present_topics)
@@ -154,50 +171,81 @@ st.session_state.page = min(max(1, st.session_state.page), total_pages)
 
 # ---------------------------- header ----------------------------
 st.markdown("## NSB Middle School – Sample Questions")
-col1, col2, col3 = st.columns([2,1,1])
-col1.markdown(f"**{len(filtered):,}** matching questions · page **{st.session_state.page}** of **{total_pages}** · {PAGE_SIZE} per page")
 
-prev, _, nxt = col2.columns([1,1,1]), None, col3.columns([1,1,1])
-
-cols = st.columns([1,1,1,1])
-if cols[0].button("⟵ Prev", disabled=st.session_state.page <= 1):
-    st.session_state.page -= 1
-if cols[1].button("Next ⟶", disabled=st.session_state.page >= total_pages):
-    st.session_state.page += 1
-cols[2].number_input(
-    "Jump to page", min_value=1, max_value=total_pages,
-    value=st.session_state.page, key="jump", label_visibility="collapsed",
-    on_change=lambda: setattr(st.session_state, "page", st.session_state.jump),
-)
-if cols[3].button("🎲 Random page"):
+# Build a filter-signature so Flashcard/Quiz state resets when filters change
+filter_sig = f"{topic}|{subtopic}|{kind}|{fmt}|{q}|{mode}"
+if filter_sig != st.session_state.fc_filter_key:
+    st.session_state.fc_filter_key = filter_sig
+    st.session_state.fc_idx = 0
+    st.session_state.fc_flipped = False
+    st.session_state.quiz_submitted = False
+    st.session_state.quiz_user_answer = None
     import random
-    st.session_state.page = random.randint(1, total_pages)
+    st.session_state.fc_order = list(range(len(filtered)))
 
-# ---------------------------- rate-limit gates ----------------------------
-now = time.time()
-# interval gate
-dt = now - st.session_state.last_page_at
-if dt < MIN_SECONDS_BETWEEN_PAGES and st.session_state.last_page_at > 0:
-    time.sleep(MIN_SECONDS_BETWEEN_PAGES - dt)
-
-# hourly cap
-served_this_hour = len([t for t in st.session_state.seen_log if now - t < 3600])
-page_slice = filtered[(st.session_state.page - 1) * PAGE_SIZE : st.session_state.page * PAGE_SIZE]
-if served_this_hour + len(page_slice) > MAX_QS_PER_HOUR:
-    remaining = max(0, MAX_QS_PER_HOUR - served_this_hour)
-    st.warning(
-        f"You've viewed {served_this_hour} questions in the last hour "
-        f"(limit {MAX_QS_PER_HOUR}). Only showing {remaining} this page. "
-        f"Come back later for more."
-    )
-    page_slice = page_slice[:remaining]
-
-# record what we served
-st.session_state.last_page_at = time.time()
-st.session_state.seen_log.extend([time.time()] * len(page_slice))
-st.session_state.seen_log = [t for t in st.session_state.seen_log if time.time() - t < 3600]
+# ensure order list is in sync with filter result size
+if len(st.session_state.fc_order) != len(filtered):
+    st.session_state.fc_order = list(range(len(filtered)))
 
 # ---------------------------- render ----------------------------
+# ---------------------------- helpers for flashcard/quiz ----------------------------
+CHOICE_SPLIT = re.compile(r"\n\s*([WXYZ])\)\s*", re.IGNORECASE)
+
+
+def parse_mc(question_text: str) -> tuple[str, list[tuple[str, str]]]:
+    """For a Multiple Choice question, return (stem, [(letter, choice_text), ...])."""
+    parts = CHOICE_SPLIT.split(question_text)
+    # Split result: [stem, 'W', 'wtext', 'X', 'xtext', ...]
+    stem = parts[0].strip()
+    choices = []
+    for i in range(1, len(parts) - 1, 2):
+        letter = parts[i].upper()
+        text = parts[i + 1].strip()
+        choices.append((letter, text))
+    return stem, choices
+
+
+def extract_correct_letter(answer: str) -> str | None:
+    """Pull the W/X/Y/Z letter out of an MC answer like 'W) STATIONARY'."""
+    m = re.match(r"\s*([WXYZ])\)", answer, re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+
+def normalize_short_answer(s: str) -> str:
+    """Lowercase, strip punctuation and whitespace for fuzzy comparison."""
+    s = re.sub(r"\(.*?\)", " ", s)  # drop parenthetical notes like (ACCEPT: XYZ)
+    s = re.sub(r"\bACCEPT\b.*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bDO\s*NOT\s*ACCEPT\b.*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"[^a-zA-Z0-9 ]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+
+def collect_acceptable(answer: str) -> list[str]:
+    """Return the main answer and any ACCEPT alternatives, normalized."""
+    main = normalize_short_answer(answer)
+    accepts = []
+    for m in re.finditer(r"ACCEPT\s*:?\s*([^;)\n]+)", answer, re.IGNORECASE):
+        accepts.append(normalize_short_answer(m.group(1)))
+    # Also split on commas inside the main
+    alts = [a.strip() for a in main.split(",") if a.strip()]
+    out = [main] + accepts + alts
+    return [a for a in out if a]
+
+
+def is_correct_short(user: str, answer: str) -> bool:
+    u = normalize_short_answer(user)
+    if not u:
+        return False
+    for a in collect_acceptable(answer):
+        if u == a:
+            return True
+        # also accept if user's answer is a prefix match or contained
+        if len(u) >= 3 and (u in a or a in u):
+            return True
+    return False
+
+
 def render_question(r: dict, idx: int):
     with st.container(border=True):
         meta_bits = [
@@ -220,13 +268,221 @@ def render_question(r: dict, idx: int):
                 st.session_state.reveal[qid] = True
                 st.rerun()
 
-prev_round = None
-for i, r in enumerate(page_slice):
-    round_key = (r["source"], r["set_label"], r["round_label"])
-    if round_key != prev_round:
-        st.markdown(f"### {r['set_label']} — {r['round_label']}")
-        prev_round = round_key
-    render_question(r, i)
+# =================================================================
+# MODE: BROWSE
+# =================================================================
+if mode.startswith("📖") or mode == "Browse":
+    col1, col2, col3 = st.columns([2, 1, 1])
+    col1.markdown(
+        f"**{len(filtered):,}** matching questions · page **{st.session_state.page}** of **{total_pages}** · {PAGE_SIZE} per page"
+    )
+
+    cols = st.columns([1, 1, 1, 1])
+    if cols[0].button("⟵ Prev", disabled=st.session_state.page <= 1):
+        st.session_state.page -= 1
+    if cols[1].button("Next ⟶", disabled=st.session_state.page >= total_pages):
+        st.session_state.page += 1
+    cols[2].number_input(
+        "Jump to page", min_value=1, max_value=total_pages,
+        value=st.session_state.page, key="jump", label_visibility="collapsed",
+        on_change=lambda: setattr(st.session_state, "page", st.session_state.jump),
+    )
+    if cols[3].button("🎲 Random page"):
+        import random
+        st.session_state.page = random.randint(1, total_pages)
+
+    # rate-limit gates
+    now = time.time()
+    dt = now - st.session_state.last_page_at
+    if dt < MIN_SECONDS_BETWEEN_PAGES and st.session_state.last_page_at > 0:
+        time.sleep(MIN_SECONDS_BETWEEN_PAGES - dt)
+
+    served_this_hour = len([t for t in st.session_state.seen_log if now - t < 3600])
+    page_slice = filtered[(st.session_state.page - 1) * PAGE_SIZE : st.session_state.page * PAGE_SIZE]
+    if served_this_hour + len(page_slice) > MAX_QS_PER_HOUR:
+        remaining = max(0, MAX_QS_PER_HOUR - served_this_hour)
+        st.warning(
+            f"You've viewed {served_this_hour} questions in the last hour "
+            f"(limit {MAX_QS_PER_HOUR}). Only showing {remaining} this page. "
+            f"Come back later for more."
+        )
+        page_slice = page_slice[:remaining]
+
+    st.session_state.last_page_at = time.time()
+    st.session_state.seen_log.extend([time.time()] * len(page_slice))
+    st.session_state.seen_log = [t for t in st.session_state.seen_log if time.time() - t < 3600]
+
+    prev_round = None
+    for i, r in enumerate(page_slice):
+        round_key = (r["source"], r["set_label"], r["round_label"])
+        if round_key != prev_round:
+            st.markdown(f"### {r['set_label']} — {r['round_label']}")
+            prev_round = round_key
+        render_question(r, i)
+
+# =================================================================
+# MODE: FLASHCARDS
+# =================================================================
+elif mode.startswith("🎴") or mode == "Flashcards":
+    import random as _rand
+
+    if not filtered:
+        st.info("No questions match your filters. Loosen the filters in the sidebar.")
+    else:
+        n = len(filtered)
+        idx = min(st.session_state.fc_idx, n - 1)
+        r = filtered[st.session_state.fc_order[idx]]
+
+        c_top = st.columns([2, 1, 1, 1])
+        c_top[0].markdown(f"**Card {idx + 1} / {n}** · {r['topic']} · {r.get('subtopic','')}")
+        if c_top[1].button("🔀 Shuffle"):
+            _rand.shuffle(st.session_state.fc_order)
+            st.session_state.fc_idx = 0
+            st.session_state.fc_flipped = False
+            st.rerun()
+        if c_top[2].button("↩️ Restart"):
+            st.session_state.fc_order = list(range(n))
+            st.session_state.fc_idx = 0
+            st.session_state.fc_flipped = False
+            st.rerun()
+        c_top[3].caption(f"{r.get('set_label','')} · {r.get('round_label','')} · {r['kind']} #{r['number']}")
+
+        # The card
+        with st.container(border=True):
+            st.caption("QUESTION" if not st.session_state.fc_flipped else "ANSWER")
+            if not st.session_state.fc_flipped:
+                st.markdown(f"### {r['question']}")
+            else:
+                st.markdown(f"### {r['question']}")
+                st.success(f"**Answer:** {r['answer']}")
+
+        c_bot = st.columns([1, 1, 1])
+        if c_bot[0].button("⟵ Previous card", disabled=idx == 0, use_container_width=True):
+            st.session_state.fc_idx = max(0, idx - 1)
+            st.session_state.fc_flipped = False
+            st.rerun()
+        flip_label = "👁 Reveal answer" if not st.session_state.fc_flipped else "🙈 Hide answer"
+        if c_bot[1].button(flip_label, use_container_width=True):
+            st.session_state.fc_flipped = not st.session_state.fc_flipped
+            st.rerun()
+        if c_bot[2].button("Next card ⟶", disabled=idx >= n - 1, use_container_width=True):
+            st.session_state.fc_idx = min(n - 1, idx + 1)
+            st.session_state.fc_flipped = False
+            st.rerun()
+
+# =================================================================
+# MODE: QUIZ
+# =================================================================
+elif mode.startswith("✏️") or mode == "Quiz":
+    import random as _rand
+
+    if not filtered:
+        st.info("No questions match your filters. Loosen the filters in the sidebar.")
+    else:
+        n = len(filtered)
+        idx = min(st.session_state.fc_idx, n - 1)
+        r = filtered[st.session_state.fc_order[idx]]
+        qid = f"{r['source']}|{r['kind']}|{r['number']}"
+
+        # score summary
+        correct = sum(1 for _, ok in st.session_state.quiz_history if ok)
+        attempted = len(st.session_state.quiz_history)
+        c_top = st.columns([2, 1, 1, 1])
+        c_top[0].markdown(f"**Question {idx + 1} / {n}** · {r['topic']} · {r.get('subtopic','')}")
+        c_top[1].metric("Correct", f"{correct}/{attempted}" if attempted else "0/0")
+        if c_top[2].button("🔀 Shuffle"):
+            _rand.shuffle(st.session_state.fc_order)
+            st.session_state.fc_idx = 0
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_user_answer = None
+            st.rerun()
+        if c_top[3].button("↺ Reset score"):
+            st.session_state.quiz_history = []
+            st.rerun()
+
+        with st.container(border=True):
+            if r["format"] == "Multiple Choice":
+                stem, choices = parse_mc(r["question"])
+                st.markdown(f"### {stem}")
+                letters = [l for l, _ in choices]
+                labels = {l: f"{l}) {t}" for l, t in choices}
+                picked = st.radio(
+                    "Your answer:",
+                    letters,
+                    format_func=lambda l: labels.get(l, l),
+                    key=f"quiz_mc_{qid}_{idx}",
+                    index=None if not st.session_state.quiz_submitted else letters.index(st.session_state.quiz_user_answer or letters[0]),
+                )
+                col_a, col_b = st.columns([1, 3])
+                if col_a.button(
+                    "Check answer",
+                    key=f"check_mc_{idx}",
+                    disabled=picked is None or st.session_state.quiz_submitted,
+                ):
+                    st.session_state.quiz_user_answer = picked
+                    st.session_state.quiz_submitted = True
+                    correct_letter = extract_correct_letter(r["answer"])
+                    is_ok = picked == correct_letter
+                    st.session_state.quiz_history.append((qid, is_ok))
+                    st.rerun()
+
+                if st.session_state.quiz_submitted:
+                    correct_letter = extract_correct_letter(r["answer"])
+                    if st.session_state.quiz_user_answer == correct_letter:
+                        st.success(f"✅ Correct! Answer: **{r['answer']}**")
+                    else:
+                        st.error(
+                            f"❌ You picked **{st.session_state.quiz_user_answer})**. "
+                            f"Correct answer: **{r['answer']}**"
+                        )
+            else:  # Short Answer
+                st.markdown(f"### {r['question']}")
+                user_in = st.text_input(
+                    "Your answer:",
+                    key=f"quiz_sa_{qid}_{idx}",
+                    disabled=st.session_state.quiz_submitted,
+                )
+                col_a, col_b = st.columns([1, 3])
+                if col_a.button(
+                    "Check answer",
+                    key=f"check_sa_{idx}",
+                    disabled=not user_in or st.session_state.quiz_submitted,
+                ):
+                    st.session_state.quiz_user_answer = user_in
+                    st.session_state.quiz_submitted = True
+                    ok = is_correct_short(user_in, r["answer"])
+                    st.session_state.quiz_history.append((qid, ok))
+                    st.rerun()
+
+                if st.session_state.quiz_submitted:
+                    if is_correct_short(st.session_state.quiz_user_answer or "", r["answer"]):
+                        st.success(f"✅ Correct! Official answer: **{r['answer']}**")
+                    else:
+                        st.error(
+                            f"❌ You wrote **{st.session_state.quiz_user_answer}**. "
+                            f"Official answer: **{r['answer']}**"
+                        )
+
+        c_bot = st.columns([1, 1, 1])
+        if c_bot[0].button("⟵ Previous", disabled=idx == 0, use_container_width=True):
+            st.session_state.fc_idx = max(0, idx - 1)
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_user_answer = None
+            st.rerun()
+        if c_bot[1].button("⏭ Skip (don't count)", use_container_width=True, disabled=idx >= n - 1):
+            st.session_state.fc_idx = min(n - 1, idx + 1)
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_user_answer = None
+            st.rerun()
+        if c_bot[2].button(
+            "Next question ⟶",
+            use_container_width=True,
+            disabled=idx >= n - 1 or not st.session_state.quiz_submitted,
+        ):
+            st.session_state.fc_idx = min(n - 1, idx + 1)
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_user_answer = None
+            st.rerun()
 
 # ---------------------------- footer / watermark ----------------------------
 st.markdown("---")
