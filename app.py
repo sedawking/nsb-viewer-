@@ -106,6 +106,16 @@ with st.sidebar:
 
     present_topics = ["All"] + [t for t in TOPIC_ORDER if any(r["topic"] == t for r in rows)]
     topic = st.selectbox("Topic", present_topics)
+
+    # Sub-topic dropdown appears only when a specific topic is selected.
+    subtopic = "All"
+    if topic != "All":
+        from collections import Counter
+        sub_counts = Counter(r.get("subtopic", "Other / General") for r in rows if r["topic"] == topic)
+        sub_options = ["All"] + [f"{name} ({n})" for name, n in sub_counts.most_common()]
+        chosen = st.selectbox("Sub-topic", sub_options)
+        subtopic = chosen.rsplit(" (", 1)[0] if chosen != "All" else "All"
+
     kind = st.selectbox("Question type", ["All", "TOSS-UP", "BONUS"])
     fmt = st.selectbox("Format", ["All", "Short Answer", "Multiple Choice"])
     search = st.text_input("Search text (question + answer)", "")
@@ -119,6 +129,12 @@ q = search.strip().lower()
 
 def match(r: dict) -> bool:
     if topic != "All" and r["topic"] != topic: return False
+    if subtopic != "All":
+        # A question matches a sub-topic if it's in its `subtopics` list
+        # (so a question tagged primarily "Forces & Newton's Laws" also appears
+        # in "Mechanics" if it mentions velocity, etc.)
+        if subtopic not in r.get("subtopics", [r.get("subtopic", "")]):
+            return False
     if kind  != "All" and r["kind"]  != kind:  return False
     if fmt   != "All" and r["format"] != fmt:  return False
     if q:
@@ -178,14 +194,17 @@ st.session_state.seen_log = [t for t in st.session_state.seen_log if time.time()
 # ---------------------------- render ----------------------------
 def render_question(r: dict, idx: int):
     with st.container(border=True):
-        tag_cols = st.columns([2,2,2,2,2,2])
-        tag_cols[0].markdown(f"**{r['topic']}**")
-        tag_cols[1].caption(r["set_label"])
-        tag_cols[2].caption(r["round_label"])
-        tag_cols[3].caption(f"{r['kind']} #{r['number']}")
-        tag_cols[4].caption(r["format"])
+        meta_bits = [
+            f"**{r['topic']}**",
+            f"_{r.get('subtopic','Other / General')}_",
+            r["set_label"],
+            r["round_label"],
+            f"{r['kind']} #{r['number']}",
+            r["format"],
+        ]
         if r.get("category_raw") and r["category_raw"].lower() != r["topic"].lower():
-            tag_cols[5].caption(f"orig: {r['category_raw']}")
+            meta_bits.append(f"orig: `{r['category_raw']}`")
+        st.caption(" · ".join(meta_bits))
         st.markdown(r["question"])
         qid = f"{r['source']}|{r['kind']}|{r['number']}"
         if st.session_state.reveal.get(qid):
