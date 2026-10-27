@@ -37,7 +37,8 @@ st.set_page_config(
 
 # ---------------------------- data ----------------------------
 @st.cache_data(show_spinner=False)
-def load_rows() -> list[dict]:
+def load_rows(_mtime: float, _size: int) -> list[dict]:
+    """Cache keyed on (file mtime, file size) so a new JSONL invalidates the cache."""
     rows = []
     with DATA_FILE.open() as f:
         for line in f:
@@ -51,6 +52,11 @@ def load_rows() -> list[dict]:
     # TOSS-UP then BONUS for each (source, number)
     rows.sort(key=lambda r: (r["source"], r["number"], 0 if r["kind"] == "TOSS-UP" else 1))
     return rows
+
+
+def _data_cache_key():
+    s = DATA_FILE.stat()
+    return s.st_mtime, s.st_size
 
 
 def _parse_set_round(source: str) -> tuple[str, str]:
@@ -96,7 +102,7 @@ if "seen_log" not in st.session_state:
 if "reveal" not in st.session_state:
     st.session_state.reveal = {}  # id -> True
 
-rows = load_rows()
+rows = load_rows(*_data_cache_key())
 
 # ---------------------------- sidebar ----------------------------
 with st.sidebar:
