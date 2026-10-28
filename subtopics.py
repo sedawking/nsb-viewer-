@@ -148,9 +148,12 @@ SUBTOPICS: dict[str, list[tuple[str, list[str]]]] = {
     ],
     "Life Sciences": [
         ("Cell Biology", [
-            "cell","organelle","nucleus","nuclei","ribosome","mitochondrion",
-            "mitochondria","chloroplast","cytoplasm","membrane","vacuole","lysosome",
-            "golgi","endoplasmic","cell wall","cytoskeleton","prokaryote","eukaryote"]),
+            "organelle","nucleus","nuclei","ribosome","mitochondrion","mitochondria",
+            "chloroplast","cytoplasm","vacuole","lysosome","golgi","endoplasmic",
+            "cell wall","cell membrane","nuclear membrane","plasma membrane",
+            "cytoskeleton","prokaryote","eukaryote","stem cell","cell cycle",
+            "nucleolus","chromatin","centriole","phagocytosis","endocytosis",
+            "exocytosis"]),
         ("Genetics & Heredity", [
             "dna","rna","gene","chromosome","allele","genotype","phenotype","genetic",
             "heredity","mutation","dominant","recessive","homozygous","heterozygous",
@@ -273,11 +276,24 @@ SUBTOPICS: dict[str, list[tuple[str, list[str]]]] = {
 
 
 def compile_subtopics():
-    out: dict[str, list[tuple[str, list[re.Pattern]]]] = {}
+    """Compile each keyword into (regex, weight) where weight = word-count.
+
+    A 1-word keyword like 'blood' gets weight 1; a 3-word keyword like
+    'white blood cell' gets weight 3. More specific phrases win over
+    single generic words.
+    """
+    out: dict[str, list[tuple[str, list[tuple[re.Pattern, int]]]]] = {}
     for topic, buckets in SUBTOPICS.items():
         out[topic] = []
         for name, terms in buckets:
-            pats = [re.compile(r"\b" + re.escape(t) + r"s?\b", re.IGNORECASE) for t in terms]
+            pats = []
+            for t in terms:
+                # Allow any whitespace (incl. line breaks from PDF text) between
+                # words of a multi-word keyword.
+                escaped = re.escape(t).replace(r"\ ", r"\s+")
+                p = re.compile(r"\b" + escaped + r"s?\b", re.IGNORECASE)
+                w = max(1, len(t.split()))
+                pats.append((p, w))
             out[topic].append((name, pats))
     return out
 
@@ -300,8 +316,8 @@ def tag_subtopics(topic: str, question: str, answer: str) -> list[str]:
 
     scored = []
     for name, pats in buckets:
-        s_stem = sum(1 for p in pats if p.search(stem))
-        s_rest = sum(1 for p in pats if p.search(rest))
+        s_stem = sum(w for p, w in pats if p.search(stem))
+        s_rest = sum(w for p, w in pats if p.search(rest))
         score = s_stem * 3 + s_rest  # weight stem heavier, same as topic classifier
         if score > 0:
             scored.append((score, name))
