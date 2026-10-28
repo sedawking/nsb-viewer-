@@ -133,6 +133,8 @@ with st.sidebar:
     topic = st.selectbox("Topic", present_topics)
 
     # Sub-topic dropdown appears only when a specific topic is selected.
+    # Counts use the question's PRIMARY subtopic so the number matches the
+    # filtered question count exactly (no cross-counting).
     subtopic = "All"
     if topic != "All":
         from collections import Counter
@@ -155,10 +157,10 @@ q = search.strip().lower()
 def match(r: dict) -> bool:
     if topic != "All" and r["topic"] != topic: return False
     if subtopic != "All":
-        # A question matches a sub-topic if it's in its `subtopics` list
-        # (so a question tagged primarily "Forces & Newton's Laws" also appears
-        # in "Mechanics" if it mentions velocity, etc.)
-        if subtopic not in r.get("subtopics", [r.get("subtopic", "")]):
+        # Primary subtopic only: every question appears in exactly one subtopic
+        # (its best-scoring one). Prevents the same question from showing under
+        # several related buckets.
+        if r.get("subtopic", "Other / General") != subtopic:
             return False
     if kind  != "All" and r["kind"]  != kind:  return False
     if fmt   != "All" and r["format"] != fmt:  return False

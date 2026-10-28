@@ -57,9 +57,10 @@ SUBTOPICS: dict[str, list[tuple[str, list[str]]]] = {
     ],
     "Physics": [
         ("Mechanics (speed, velocity, acceleration)", [
-            "speed","velocity","acceleration","deceleration","displacement","momentum",
-            "inertia","projectile","trajectory","kinematics","motion","collision",
-            "elastic","inelastic","meters per second"]),
+            "velocity","acceleration","deceleration","displacement","momentum",
+            "projectile","trajectory","kinematics","collision","elastic collision",
+            "inelastic collision","meters per second","kilometers per hour",
+            "miles per hour","average speed"]),
         ("Forces & Newton's Laws", [
             "force","newton","friction","gravity","gravitational","weight",
             "normal force","tension","free body","action","reaction","law of motion",
