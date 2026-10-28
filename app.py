@@ -27,7 +27,7 @@ DATA_FILE = Path(__file__).parent / "all_questions_classified.jsonl"
 # buttons; anyone not on the list can still type a name.
 KNOWN_KIDS = [k.strip() for k in os.environ.get(
     "NSB_KIDS",
-    "Aarav, Advika, Anvi, Arjun, Diya, Ishaan, Kabir, Mira, Rohan, Saanvi, Vihaan, Zara"
+    "Tanvish Bejjanki, Ramswarup Prasanna Kumar, Eric Han, Kartikeya Anumula, Edward Tan"
 ).split(",") if k.strip()]
 
 # Admin password controls access to the attribution dashboard in the sidebar.
@@ -140,9 +140,10 @@ if not st.session_state.user_name:
     st.markdown("### Who's studying today?")
     st.caption("Pick your name so your coach can see your progress. If you're not listed, type your name below.")
 
-    cols = st.columns(4)
+    per_row = 2 if any(len(k) > 15 for k in KNOWN_KIDS) else 4
+    cols = st.columns(per_row)
     for i, kid in enumerate(KNOWN_KIDS):
-        if cols[i % 4].button(kid, key=f"login_{kid}", use_container_width=True):
+        if cols[i % per_row].button(kid, key=f"login_{kid}", use_container_width=True):
             st.session_state.user_name = kid
             st.session_state.login_at = time.time()
             st.rerun()
