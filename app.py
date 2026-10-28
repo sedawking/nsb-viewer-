@@ -23,6 +23,17 @@ MIN_SECONDS_BETWEEN_PAGES = float(os.environ.get("NSB_MIN_PAGE_INTERVAL", 2.0))
 MAX_QS_PER_HOUR = int(os.environ.get("NSB_MAX_QS_PER_HOUR", 400))
 DATA_FILE = Path(__file__).parent / "all_questions_classified.jsonl"
 
+# Known kids on the team. The login screen will show these as quick-pick
+# buttons; anyone not on the list can still type a name.
+KNOWN_KIDS = [k.strip() for k in os.environ.get(
+    "NSB_KIDS",
+    "Aarav, Advika, Anvi, Arjun, Diya, Ishaan, Kabir, Mira, Rohan, Saanvi, Vihaan, Zara"
+).split(",") if k.strip()]
+
+# Admin password controls access to the attribution dashboard in the sidebar.
+# Leave unset to disable the dashboard entirely.
+ADMIN_PASSWORD = os.environ.get("NSB_ADMIN_PASSWORD", "")
+
 TOPIC_ORDER = [
     "Math", "Physics", "Chemistry",
     "Life Sciences", "Earth and Space", "Energy",
@@ -118,6 +129,32 @@ if "quiz_submitted" not in st.session_state:
     st.session_state.quiz_submitted = False
 if "quiz_user_answer" not in st.session_state:
     st.session_state.quiz_user_answer = None
+if "user_name" not in st.session_state:
+    st.session_state.user_name = None
+if "login_at" not in st.session_state:
+    st.session_state.login_at = None
+
+# ---------------------------- login gate ----------------------------
+if not st.session_state.user_name:
+    st.title("🧪 NSB Middle School Study Tool")
+    st.markdown("### Who's studying today?")
+    st.caption("Pick your name so your coach can see your progress. If you're not listed, type your name below.")
+
+    cols = st.columns(4)
+    for i, kid in enumerate(KNOWN_KIDS):
+        if cols[i % 4].button(kid, key=f"login_{kid}", use_container_width=True):
+            st.session_state.user_name = kid
+            st.session_state.login_at = time.time()
+            st.rerun()
+
+    st.markdown("---")
+    other = st.text_input("Not listed? Type your name:")
+    c1, c2 = st.columns([1, 3])
+    if c1.button("Start studying ⟶", disabled=not other.strip(), type="primary"):
+        st.session_state.user_name = other.strip()[:40]
+        st.session_state.login_at = time.time()
+        st.rerun()
+    st.stop()
 
 rows = load_rows(*_data_cache_key())
 
@@ -125,6 +162,17 @@ rows = load_rows(*_data_cache_key())
 with st.sidebar:
     st.title("🧪 NSB MS Study")
     st.caption(f"{len(rows):,} questions across all 16 Sample Question Sets")
+    # Who's logged in
+    with st.container(border=True):
+        st.markdown(f"👤 **{st.session_state.user_name}**")
+        login_elapsed = int(time.time() - (st.session_state.login_at or time.time()))
+        mins, secs = divmod(login_elapsed, 60)
+        st.caption(f"studying for {mins}m {secs}s")
+        if st.button("Switch user", use_container_width=True):
+            # Keep nothing — fresh session for next user
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
     st.markdown("---")
 
     mode = st.radio("Mode", ["📖 Browse", "🎴 Flashcards", "✏️ Quiz"], horizontal=False)
@@ -496,6 +544,8 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     st.session_state.quiz_user_answer = picked
                     st.session_state.quiz_submitted = True
                     st.session_state.quiz_history.append({
+                        "user": st.session_state.user_name,
+                        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "qid": qid, "kind": r["kind"], "topic": r["topic"],
                         "subtopic": r.get("subtopic"), "format": r["format"],
                         "correct": is_ok, "user_answer": picked,
@@ -531,6 +581,8 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     st.session_state.quiz_user_answer = user_in
                     st.session_state.quiz_submitted = True
                     st.session_state.quiz_history.append({
+                        "user": st.session_state.user_name,
+                        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "qid": qid, "kind": r["kind"], "topic": r["topic"],
                         "subtopic": r.get("subtopic"), "format": r["format"],
                         "correct": ok, "user_answer": user_in,
@@ -620,9 +672,52 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     mime="text/csv",
                 )
 
+# ---------------------------- admin dashboard ----------------------------
+if ADMIN_PASSWORD:
+    with st.sidebar:
+        st.markdown("---")
+        with st.expander("👩‍🏫 Coach / admin"):
+            pw = st.text_input("Admin password", type="password", key="admin_pw")
+            if pw and pw == ADMIN_PASSWORD:
+                hist = st.session_state.quiz_history
+                if not hist:
+                    st.info("No quiz attempts yet in this session.")
+                else:
+                    from collections import Counter as _C
+                    import csv as _csv, io as _io
+
+                    users = _C(h["user"] for h in hist)
+                    st.markdown(f"**{len(hist)}** quiz attempts in this session · {len(users)} user(s)")
+                    for u, n in users.most_common():
+                        uh = [h for h in hist if h["user"] == u]
+                        c = sum(1 for h in uh if h["correct"])
+                        pts = sum(h["points"] for h in uh if h["correct"])
+                        pct = (c / len(uh) * 100) if uh else 0
+                        st.markdown(f"• **{u}** — {c}/{len(uh)} correct ({pct:.0f}%) · {pts} NSB pts")
+
+                    # CSV export
+                    buf = _io.StringIO()
+                    cols = ["user", "at", "topic", "subtopic", "kind", "format",
+                            "correct", "points", "user_answer", "official_answer",
+                            "question", "source", "round_label"]
+                    w = _csv.DictWriter(buf, fieldnames=cols)
+                    w.writeheader()
+                    for h in hist:
+                        w.writerow({k: h.get(k, "") for k in cols})
+                    st.download_button(
+                        "Download full log (CSV)",
+                        buf.getvalue(),
+                        file_name=f"nsb_log_{time.strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+            elif pw:
+                st.error("Wrong password")
+
 # ---------------------------- footer / watermark ----------------------------
 st.markdown("---")
 st.caption(
+    f"👤 {st.session_state.user_name} · "
     f"Session {st.session_state.sid} · "
     f"{time.strftime('%Y-%m-%d %H:%M:%S')} · "
     f"page {st.session_state.page}/{total_pages} · "
