@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 # ---------------------------- config ----------------------------
 PAGE_SIZE = int(os.environ.get("NSB_PAGE_SIZE", 10))
@@ -63,6 +64,33 @@ def load_rows(_mtime: float, _size: int) -> list[dict]:
     # TOSS-UP then BONUS for each (source, number)
     rows.sort(key=lambda r: (r["source"], r["number"], 0 if r["kind"] == "TOSS-UP" else 1))
     return rows
+
+
+def build_pair_index(rows: list[dict]) -> dict:
+    """(source, number) -> list of rows sharing that key.
+    Used to pull in a toss-up's matching bonus (or vice versa) when the
+    subtopic / kind filter only catches one half of a pair."""
+    from collections import defaultdict
+    lookup: dict = defaultdict(list)
+    for r in rows:
+        lookup[(r["source"], r["number"])].append(r)
+    return lookup
+
+
+def expand_pairs(filtered: list[dict], pair_index: dict) -> list[dict]:
+    """Given a filtered list, return the same rows plus any missing TOSS-UP or
+    BONUS partners (identified by same source+number), re-sorted so each pair
+    sits together with TOSS-UP first."""
+    keys = {(r["source"], r["number"]) for r in filtered}
+    seen = {id(r) for r in filtered}
+    out = list(filtered)
+    for k in keys:
+        for partner in pair_index.get(k, []):
+            if id(partner) not in seen:
+                out.append(partner)
+                seen.add(id(partner))
+    out.sort(key=lambda r: (r["source"], r["number"], 0 if r["kind"] == "TOSS-UP" else 1))
+    return out
 
 
 def _data_cache_key():
@@ -133,6 +161,13 @@ if "user_name" not in st.session_state:
     st.session_state.user_name = None
 if "login_at" not in st.session_state:
     st.session_state.login_at = None
+# Timer state (quiz NSB-round mode)
+if "q_started_at" not in st.session_state:
+    st.session_state.q_started_at = 0.0
+if "q_qid" not in st.session_state:
+    st.session_state.q_qid = ""
+if "q_timed_out" not in st.session_state:
+    st.session_state.q_timed_out = False
 
 # ---------------------------- login gate ----------------------------
 if not st.session_state.user_name:
@@ -197,6 +232,29 @@ with st.sidebar:
     search = st.text_input("Search text (question + answer)", "")
 
     st.markdown("---")
+    pair_mode = st.checkbox(
+        "🧩 Keep toss-up / bonus pairs together",
+        value=True,
+        help=(
+            "NSB rounds alternate toss-up → bonus by question number. If your "
+            "subtopic filter only matches the toss-up half, the matching bonus "
+            "is pulled in so you see the round the way it was played."
+        ),
+    )
+    if pair_mode and kind != "All":
+        st.caption("⚠️ Pair mode is on, so the Question-type filter is relaxed to keep each pair intact.")
+    nsb_rules = False
+    if mode.startswith("✏️"):
+        nsb_rules = st.checkbox(
+            "🏆 NSB round rules in Quiz (timers)",
+            value=True,
+            help=(
+                "5-second clock on toss-ups, 20-second clock on bonuses. "
+                "Bonus is skipped if the toss-up was wrong (just like a real match)."
+            ),
+        )
+
+    st.markdown("---")
     st.caption(f"Session **#{st.session_state.sid}**")
     st.caption(f"Served this hour: **{len([t for t in st.session_state.seen_log if time.time()-t<3600])}** / {MAX_QS_PER_HOUR}")
 
@@ -219,6 +277,12 @@ def match(r: dict) -> bool:
     return True
 
 filtered = [r for r in rows if match(r)]
+
+# Expand to full toss-up/bonus pairs if the user has that mode on.
+pair_index = build_pair_index(rows)
+if pair_mode and filtered:
+    filtered = expand_pairs(filtered, pair_index)
+
 total_pages = max(1, (len(filtered) + PAGE_SIZE - 1) // PAGE_SIZE)
 st.session_state.page = min(max(1, st.session_state.page), total_pages)
 
@@ -226,7 +290,7 @@ st.session_state.page = min(max(1, st.session_state.page), total_pages)
 st.markdown("## NSB Middle School – Sample Questions")
 
 # Build a filter-signature so Flashcard/Quiz state resets when filters change
-filter_sig = f"{topic}|{subtopic}|{kind}|{fmt}|{q}|{mode}"
+filter_sig = f"{topic}|{subtopic}|{kind}|{fmt}|{q}|{mode}|pair={pair_mode}|nsb={nsb_rules}"
 if filter_sig != st.session_state.fc_filter_key:
     st.session_state.fc_filter_key = filter_sig
     st.session_state.fc_idx = 0
@@ -366,11 +430,18 @@ if mode.startswith("📖") or mode == "Browse":
     st.session_state.seen_log = [t for t in st.session_state.seen_log if time.time() - t < 3600]
 
     prev_round = None
+    prev_pair = None
     for i, r in enumerate(page_slice):
         round_key = (r["source"], r["set_label"], r["round_label"])
         if round_key != prev_round:
             st.markdown(f"### {r['set_label']} — {r['round_label']}")
             prev_round = round_key
+            prev_pair = None
+        pair_key = (r["source"], r["number"])
+        if pair_mode and pair_key != prev_pair:
+            # Small divider so the student visually sees "a new pair begins"
+            st.markdown(f"**— Pair #{r['number']} —**")
+            prev_pair = pair_key
         render_question(r, i)
 
 # =================================================================
@@ -430,8 +501,9 @@ elif mode.startswith("✏️") or mode == "Quiz":
     import random as _rand
     from collections import defaultdict as _dd
 
-    # NSB official points: toss-up = 4, bonus = 10
+    # NSB official points & time limits.
     POINTS = {"TOSS-UP": 4, "BONUS": 10}
+    LIMIT = {"TOSS-UP": 5, "BONUS": 20}  # seconds
 
     def _streaks(hist):
         """Return (current, best) streaks of correct answers in history order."""
@@ -451,6 +523,49 @@ elif mode.startswith("✏️") or mode == "Quiz":
         idx = min(st.session_state.fc_idx, n - 1)
         r = filtered[st.session_state.fc_order[idx]]
         qid = f"{r['source']}|{r['kind']}|{r['number']}"
+
+        # ------------- NSB timer bookkeeping -------------
+        # When a new question is first shown, stamp its start time.
+        if nsb_rules and st.session_state.q_qid != qid:
+            st.session_state.q_started_at = time.time()
+            st.session_state.q_qid = qid
+            st.session_state.q_timed_out = False
+
+        limit_s = LIMIT.get(r["kind"], 0)
+        elapsed = time.time() - st.session_state.q_started_at if nsb_rules else 0.0
+        remaining = max(0.0, limit_s - elapsed)
+        timed_out = nsb_rules and remaining <= 0 and not st.session_state.quiz_submitted
+
+        # Keep rerunning until the timer hits zero or the user submits.
+        if nsb_rules and not st.session_state.quiz_submitted and remaining > 0:
+            st_autorefresh(interval=250, key=f"timer-{qid}-{idx}")
+
+        # ------------- advance helper (NSB-aware) -------------
+        def _advance(after_tossup_correct: bool | None = None):
+            """Move to the next question. In NSB-rules mode, skip the matching
+            bonus when the toss-up was wrong (or timed out)."""
+            cur = filtered[st.session_state.fc_order[idx]]
+            next_idx = idx + 1
+            step = 1
+            if (
+                nsb_rules
+                and cur["kind"] == "TOSS-UP"
+                and after_tossup_correct is False
+                and next_idx < n
+            ):
+                nxt = filtered[st.session_state.fc_order[next_idx]]
+                if (
+                    nxt["source"] == cur["source"]
+                    and nxt["number"] == cur["number"]
+                    and nxt["kind"] == "BONUS"
+                ):
+                    step = 2  # skip the bonus
+                    st.toast("⏭ Bonus skipped (toss-up wasn't right)")
+            st.session_state.fc_idx = min(n - 1, idx + step)
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_user_answer = None
+            st.session_state.q_qid = ""  # force fresh timer on next question
+            st.rerun()
 
         # ---------- scoreboard ----------
         hist = st.session_state.quiz_history
@@ -503,24 +618,88 @@ elif mode.startswith("✏️") or mode == "Quiz":
 
         ctl = st.columns([1, 1, 1])
         if ctl[0].button("🔀 Shuffle deck"):
-            _rand.shuffle(st.session_state.fc_order)
+            if pair_mode:
+                # Shuffle whole pairs so toss-up/bonus stay adjacent
+                chunks = []
+                i = 0
+                while i < n:
+                    cur = filtered[st.session_state.fc_order[i]] if False else filtered[i]
+                    if i + 1 < n:
+                        nxt = filtered[i + 1]
+                        if (cur["source"] == nxt["source"] and cur["number"] == nxt["number"]
+                                and cur["kind"] != nxt["kind"]):
+                            chunks.append([i, i + 1])
+                            i += 2
+                            continue
+                    chunks.append([i])
+                    i += 1
+                _rand.shuffle(chunks)
+                st.session_state.fc_order = [j for ch in chunks for j in ch]
+            else:
+                _rand.shuffle(st.session_state.fc_order)
             st.session_state.fc_idx = 0
             st.session_state.quiz_submitted = False
             st.session_state.quiz_user_answer = None
+            st.session_state.q_qid = ""
             st.rerun()
         if ctl[1].button("↺ Reset score"):
             st.session_state.quiz_history = []
+            st.session_state.q_qid = ""
             st.rerun()
         if ctl[2].button("↩️ Restart deck"):
             st.session_state.fc_order = list(range(n))
             st.session_state.fc_idx = 0
             st.session_state.quiz_submitted = False
             st.session_state.quiz_user_answer = None
+            st.session_state.q_qid = ""
             st.rerun()
 
         # ---------- question card ----------
         with st.container(border=True):
             st.caption(f"{r['kind']} · {r['format']} · worth {POINTS.get(r['kind'], 0)} pts · {r.get('set_label','')} · {r.get('round_label','')}")
+
+            # Visible countdown + auto-timeout
+            if nsb_rules:
+                if timed_out:
+                    st.error(
+                        f"⏰ **Time's up!** {r['kind']} limit was {limit_s}s. "
+                        "This question will be scored **0 points**."
+                    )
+                else:
+                    # colored urgency band
+                    frac = remaining / max(1, limit_s)
+                    color = "#2ecc71" if frac > 0.6 else ("#f1c40f" if frac > 0.3 else "#e74c3c")
+                    st.markdown(
+                        f"<div style='font-size:1.8rem;font-weight:700;color:{color};'>"
+                        f"⏱ {remaining:4.1f}s  "
+                        f"<span style='font-size:1rem;color:#999;font-weight:400;'>"
+                        f"of {limit_s}s on this {r['kind']}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+
+            def _record(is_ok: bool, user_answer, late: bool = False):
+                st.session_state.quiz_user_answer = user_answer
+                st.session_state.quiz_submitted = True
+                st.session_state.quiz_history.append({
+                    "user": st.session_state.user_name,
+                    "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "qid": qid, "kind": r["kind"], "topic": r["topic"],
+                    "subtopic": r.get("subtopic"), "format": r["format"],
+                    "correct": is_ok, "user_answer": user_answer,
+                    "official_answer": r["answer"],
+                    "question": r["question"][:200],
+                    "source": r["source"], "round_label": r.get("round_label"),
+                    "points": POINTS.get(r["kind"], 0) if is_ok else 0,
+                    "late": late,
+                    "elapsed_s": round(elapsed, 2) if nsb_rules else None,
+                })
+
+            # Auto-timeout: if NSB rules on and clock hit zero and user hasn't submitted,
+            # auto-record as wrong (0 pts) so the deck can move on.
+            if timed_out and not st.session_state.quiz_submitted:
+                _record(is_ok=False, user_answer="(no answer — time out)", late=True)
+                st.rerun()
+
             if r["format"] == "Multiple Choice":
                 stem, choices = parse_mc(r["question"])
                 st.markdown(f"### {stem}")
@@ -541,25 +720,17 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     disabled=picked is None or st.session_state.quiz_submitted,
                 ):
                     correct_letter = extract_correct_letter(r["answer"])
-                    is_ok = picked == correct_letter
-                    st.session_state.quiz_user_answer = picked
-                    st.session_state.quiz_submitted = True
-                    st.session_state.quiz_history.append({
-                        "user": st.session_state.user_name,
-                        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "qid": qid, "kind": r["kind"], "topic": r["topic"],
-                        "subtopic": r.get("subtopic"), "format": r["format"],
-                        "correct": is_ok, "user_answer": picked,
-                        "official_answer": r["answer"],
-                        "question": r["question"][:200],
-                        "source": r["source"], "round_label": r.get("round_label"),
-                        "points": POINTS.get(r["kind"], 0) if is_ok else 0,
-                    })
+                    late = nsb_rules and (elapsed > limit_s)
+                    is_ok = (picked == correct_letter) and not late
+                    _record(is_ok, picked, late=late)
                     st.rerun()
 
                 if st.session_state.quiz_submitted:
                     correct_letter = extract_correct_letter(r["answer"])
-                    if st.session_state.quiz_user_answer == correct_letter:
+                    last = st.session_state.quiz_history[-1]
+                    if last.get("late"):
+                        st.error(f"⏰ Too slow — 0 pts. Correct answer: **{r['answer']}**")
+                    elif st.session_state.quiz_user_answer == correct_letter:
                         st.success(f"✅ Correct! +{POINTS.get(r['kind'], 0)} pts · Answer: **{r['answer']}**")
                     else:
                         st.error(
@@ -578,24 +749,16 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     key=f"check_sa_{idx}",
                     disabled=not user_in or st.session_state.quiz_submitted,
                 ):
-                    ok = is_correct_short(user_in, r["answer"])
-                    st.session_state.quiz_user_answer = user_in
-                    st.session_state.quiz_submitted = True
-                    st.session_state.quiz_history.append({
-                        "user": st.session_state.user_name,
-                        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "qid": qid, "kind": r["kind"], "topic": r["topic"],
-                        "subtopic": r.get("subtopic"), "format": r["format"],
-                        "correct": ok, "user_answer": user_in,
-                        "official_answer": r["answer"],
-                        "question": r["question"][:200],
-                        "source": r["source"], "round_label": r.get("round_label"),
-                        "points": POINTS.get(r["kind"], 0) if ok else 0,
-                    })
+                    late = nsb_rules and (elapsed > limit_s)
+                    ok = is_correct_short(user_in, r["answer"]) and not late
+                    _record(ok, user_in, late=late)
                     st.rerun()
 
                 if st.session_state.quiz_submitted:
-                    if is_correct_short(st.session_state.quiz_user_answer or "", r["answer"]):
+                    last = st.session_state.quiz_history[-1]
+                    if last.get("late"):
+                        st.error(f"⏰ Too slow — 0 pts. Official answer: **{r['answer']}**")
+                    elif is_correct_short(st.session_state.quiz_user_answer or "", r["answer"]):
                         st.success(
                             f"✅ Correct! +{POINTS.get(r['kind'], 0)} pts · "
                             f"Official answer: **{r['answer']}**"
@@ -610,7 +773,6 @@ elif mode.startswith("✏️") or mode == "Quiz":
                             key=f"override_{idx}",
                             help="Manual override if the fuzzy match was too strict",
                         ):
-                            last = st.session_state.quiz_history[-1]
                             last["correct"] = True
                             last["points"] = POINTS.get(r["kind"], 0)
                             st.rerun()
@@ -620,21 +782,26 @@ elif mode.startswith("✏️") or mode == "Quiz":
             st.session_state.fc_idx = max(0, idx - 1)
             st.session_state.quiz_submitted = False
             st.session_state.quiz_user_answer = None
+            st.session_state.q_qid = ""  # fresh timer
             st.rerun()
         if c_bot[1].button("⏭ Skip (don't count)", use_container_width=True, disabled=idx >= n - 1):
             st.session_state.fc_idx = min(n - 1, idx + 1)
             st.session_state.quiz_submitted = False
             st.session_state.quiz_user_answer = None
+            st.session_state.q_qid = ""
             st.rerun()
         if c_bot[2].button(
             "Next question ⟶",
             use_container_width=True,
             disabled=idx >= n - 1 or not st.session_state.quiz_submitted,
         ):
-            st.session_state.fc_idx = min(n - 1, idx + 1)
-            st.session_state.quiz_submitted = False
-            st.session_state.quiz_user_answer = None
-            st.rerun()
+            # NSB rule: if this was a TOSS-UP and it was wrong (incl. timeout),
+            # skip the matching BONUS and go to the next pair.
+            last = st.session_state.quiz_history[-1] if st.session_state.quiz_history else None
+            if last and r["kind"] == "TOSS-UP":
+                _advance(after_tossup_correct=last["correct"])
+            else:
+                _advance()
 
         # ---------- end-of-deck summary ----------
         if idx == n - 1 and st.session_state.quiz_submitted:
