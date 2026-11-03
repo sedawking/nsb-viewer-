@@ -555,8 +555,12 @@ elif mode.startswith("✏️") or mode == "Quiz":
         timed_out = nsb_rules and remaining <= 0 and not st.session_state.quiz_submitted
 
         # Keep rerunning until the timer hits zero or the user submits.
+        # 500 ms is smooth enough for a visible countdown and far gentler on
+        # Streamlit Cloud than 250 ms. `limit` caps total ticks so we never
+        # spin indefinitely even if session state goes sideways.
         if nsb_rules and not st.session_state.quiz_submitted and remaining > 0:
-            st_autorefresh(interval=250, key=f"timer-{qid}-{idx}")
+            max_ticks = max(10, int((limit_s + 2) * 2))  # 2 Hz + 2s grace
+            st_autorefresh(interval=500, limit=max_ticks, key=f"timer-{qid}-{idx}")
 
         # ------------- advance helper (NSB-aware) -------------
         def _advance(after_tossup_correct: bool | None = None):
