@@ -662,6 +662,8 @@ elif mode.startswith("✏️") or mode == "Quiz":
             st.rerun()
         if ctl[1].button("↺ Reset score"):
             st.session_state.quiz_history = []
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_user_answer = None
             st.session_state.q_qid = ""
             st.rerun()
         if ctl[2].button("↩️ Restart deck"):
@@ -745,6 +747,10 @@ elif mode.startswith("✏️") or mode == "Quiz":
 
                 if st.session_state.quiz_submitted:
                     correct_letter = extract_correct_letter(r["answer"])
+                    if not st.session_state.quiz_history:
+                        # state drift (e.g. after Reset score before next question) — recover
+                        st.session_state.quiz_submitted = False
+                        st.rerun()
                     last = st.session_state.quiz_history[-1]
                     if last.get("late"):
                         st.error(f"⏰ Too slow — 0 pts. Correct answer: **{r['answer']}**")
@@ -773,6 +779,9 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     st.rerun()
 
                 if st.session_state.quiz_submitted:
+                    if not st.session_state.quiz_history:
+                        st.session_state.quiz_submitted = False
+                        st.rerun()
                     last = st.session_state.quiz_history[-1]
                     if last.get("late"):
                         st.error(f"⏰ Too slow — 0 pts. Official answer: **{r['answer']}**")
