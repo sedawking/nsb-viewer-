@@ -253,18 +253,6 @@ with st.sidebar:
     if pair_mode and kind != "All":
         st.caption("⚠️ Pair mode is on, so the Question-type filter is relaxed to keep each pair intact.")
 
-    show_timer = False
-    if mode.startswith("📖"):
-        show_timer = st.checkbox(
-            "⏱ Thinking-timer in Browse",
-            value=True,
-            help=(
-                "Shows a shrinking bar on each card — 5 s on toss-ups, 20 s on bonuses "
-                "(NSB round limits). Pure visual pacing; nothing is scored. "
-                "The timer resets whenever the page reloads or you change pages."
-            ),
-        )
-
     st.markdown("---")
     st.caption(f"Session **#{st.session_state.sid}**")
     st.caption(f"Served this hour: **{len([t for t in st.session_state.seen_log if time.time()-t<3600])}** / {MAX_QS_PER_HOUR}")
@@ -375,34 +363,7 @@ def is_correct_short(user: str, answer: str) -> bool:
     return False
 
 
-def _timer_bar_html(limit_s: int) -> str:
-    """Pure-CSS shrinking countdown bar. Starts animating when the element
-    mounts; no JS, no server round-trips. 5 s on toss-ups, 20 s on bonuses."""
-    return f"""
-    <div style="margin:4px 0 10px 0;">
-      <div style="display:flex;justify-content:space-between;align-items:center;
-                  font-size:.85rem;color:#888;margin-bottom:3px;">
-        <span>⏱ {limit_s}s to think…</span>
-        <span style="font-variant-numeric:tabular-nums;">NSB clock</span>
-      </div>
-      <div style="position:relative;height:8px;background:#eee;border-radius:4px;
-                  overflow:hidden;">
-        <div style="position:absolute;top:0;left:0;bottom:0;width:100%;
-                    background:#2ecc71;
-                    animation:nsbtbar{limit_s} {limit_s}s linear forwards;"></div>
-      </div>
-      <style>
-        @keyframes nsbtbar{limit_s} {{
-          0%   {{ width:100%; background:#2ecc71; }}
-          55%  {{ width:45%;  background:#f1c40f; }}
-          100% {{ width:0%;   background:#e74c3c; }}
-        }}
-      </style>
-    </div>
-    """
-
-
-def render_question(r: dict, idx: int, show_timer: bool = False):
+def render_question(r: dict, idx: int):
     with st.container(border=True):
         meta_bits = [
             f"**{r['topic']}**",
@@ -415,9 +376,6 @@ def render_question(r: dict, idx: int, show_timer: bool = False):
         if r.get("category_raw") and r["category_raw"].lower() != r["topic"].lower():
             meta_bits.append(f"orig: `{r['category_raw']}`")
         st.caption(" · ".join(meta_bits))
-        if show_timer:
-            limit_s = 5 if r["kind"] == "TOSS-UP" else 20
-            st.markdown(_timer_bar_html(limit_s), unsafe_allow_html=True)
         st.markdown(r["question"])
         qid = f"{r['source']}|{r['kind']}|{r['number']}"
         if st.session_state.reveal.get(qid):
@@ -484,7 +442,7 @@ if mode.startswith("📖") or mode == "Browse":
             # Small divider so the student visually sees "a new pair begins"
             st.markdown(f"**— Pair #{r['number']} —**")
             prev_pair = pair_key
-        render_question(r, i, show_timer=show_timer)
+        render_question(r, i)
 
 # =================================================================
 # MODE: FLASHCARDS
