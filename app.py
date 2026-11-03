@@ -213,19 +213,36 @@ with st.sidebar:
 
     mode = st.radio("Mode", ["📖 Browse", "🎴 Flashcards", "✏️ Quiz"], horizontal=False)
 
-    present_topics = ["All"] + [t for t in TOPIC_ORDER if any(r["topic"] == t for r in rows)]
-    topic = st.selectbox("Topic", present_topics)
+    present_topics = [t for t in TOPIC_ORDER if any(r["topic"] == t for r in rows)]
+    selected_topics = st.multiselect(
+        "Topics",
+        present_topics,
+        default=[],
+        placeholder="All topics — or pick 1 or more",
+        help=(
+            "Pick as many topics as you want (e.g. Physics + Life Sciences). "
+            "Leave empty to study across all topics. "
+            "The Sub-topic filter appears when you pick exactly one topic."
+        ),
+    )
+    # Empty = all topics
+    topics_filter = set(selected_topics) if selected_topics else set(present_topics)
 
-    # Sub-topic dropdown appears only when a specific topic is selected.
+    # Sub-topic dropdown appears only when exactly one topic is selected.
     # Counts use the question's PRIMARY subtopic so the number matches the
     # filtered question count exactly (no cross-counting).
     subtopic = "All"
-    if topic != "All":
+    if len(selected_topics) == 1:
         from collections import Counter
-        sub_counts = Counter(r.get("subtopic", "Other / General") for r in rows if r["topic"] == topic)
+        only_topic = selected_topics[0]
+        sub_counts = Counter(
+            r.get("subtopic", "Other / General") for r in rows if r["topic"] == only_topic
+        )
         sub_options = ["All"] + [f"{name} ({n})" for name, n in sub_counts.most_common()]
         chosen = st.selectbox("Sub-topic", sub_options)
         subtopic = chosen.rsplit(" (", 1)[0] if chosen != "All" else "All"
+    elif len(selected_topics) > 1:
+        st.caption("💡 Sub-topic filter appears when exactly one topic is picked.")
 
     kind = st.selectbox("Question type", ["All", "TOSS-UP", "BONUS"])
     fmt = st.selectbox("Format", ["All", "Short Answer", "Multiple Choice"])
@@ -262,7 +279,7 @@ with st.sidebar:
 q = search.strip().lower()
 
 def match(r: dict) -> bool:
-    if topic != "All" and r["topic"] != topic: return False
+    if r["topic"] not in topics_filter: return False
     if subtopic != "All":
         # Primary subtopic only: every question appears in exactly one subtopic
         # (its best-scoring one). Prevents the same question from showing under
@@ -290,7 +307,8 @@ st.session_state.page = min(max(1, st.session_state.page), total_pages)
 st.markdown("## NSB Middle School – Sample Questions")
 
 # Build a filter-signature so Flashcard/Quiz state resets when filters change
-filter_sig = f"{topic}|{subtopic}|{kind}|{fmt}|{q}|{mode}|pair={pair_mode}|nsb={nsb_rules}"
+_topics_sig = ",".join(sorted(selected_topics)) if selected_topics else "ALL"
+filter_sig = f"{_topics_sig}|{subtopic}|{kind}|{fmt}|{q}|{mode}|pair={pair_mode}|nsb={nsb_rules}"
 if filter_sig != st.session_state.fc_filter_key:
     st.session_state.fc_filter_key = filter_sig
     st.session_state.fc_idx = 0
