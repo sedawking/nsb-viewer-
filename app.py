@@ -410,9 +410,11 @@ if mode.startswith("📖") or mode == "Browse":
     if cols[1].button("Next ⟶", disabled=st.session_state.page >= total_pages, use_container_width=True):
         st.session_state.page += 1
         st.rerun()
-    # Jump: use a filter-scoped key so stale widget state never overrides `page`.
-    # (Reading the return value and comparing avoids the `value=`+`key=` footgun.)
-    jump_key = f"jump_{filter_sig}_{total_pages}"
+    # Jump: include the current page in the widget key so a FRESH widget is
+    # created on every Prev/Next/Random click. This is the only reliable way
+    # to make `value=` win over stored widget state on reruns (the dreaded
+    # `value=`+`key=` footgun in Streamlit).
+    jump_key = f"jump_{filter_sig}_p{st.session_state.page}_t{total_pages}"
     jump_to = cols[2].number_input(
         "Jump to page", min_value=1, max_value=total_pages,
         value=int(st.session_state.page),
