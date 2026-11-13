@@ -243,11 +243,14 @@ with st.sidebar:
     st.markdown("---")
     pair_mode = st.checkbox(
         "🧩 Keep toss-up / bonus pairs together",
-        value=True,
+        value=False,
         help=(
-            "NSB rounds alternate toss-up → bonus by question number. If your "
-            "subtopic filter only matches the toss-up half, the matching bonus "
-            "is pulled in so you see the round the way it was played."
+            "Off by default so your Topic / Sub-topic filter is strict (only shows "
+            "what you picked).\n\n"
+            "Turn ON for NSB-style practice: for every matched toss-up, the "
+            "bonus from the same round is pulled in even if it's about a different "
+            "topic (e.g. a Physics toss-up might be paired with a Chemistry bonus). "
+            "Pulled-in partners are tagged '🔗 partner' on their card."
         ),
     )
     if pair_mode and kind != "All":
@@ -276,6 +279,10 @@ def match(r: dict) -> bool:
     return True
 
 filtered = [r for r in rows if match(r)]
+
+# Tag primary matches (these passed the strict filter) so we can badge
+# pulled-in partners in the UI when pair_mode expands the set.
+primary_ids = {id(r) for r in filtered}
 
 # Expand to full toss-up/bonus pairs if the user has that mode on.
 pair_index = build_pair_index(rows)
@@ -363,7 +370,7 @@ def is_correct_short(user: str, answer: str) -> bool:
     return False
 
 
-def render_question(r: dict, idx: int):
+def render_question(r: dict, idx: int, is_primary: bool = True):
     with st.container(border=True):
         meta_bits = [
             f"**{r['topic']}**",
@@ -373,6 +380,8 @@ def render_question(r: dict, idx: int):
             f"{r['kind']} #{r['number']}",
             r["format"],
         ]
+        if not is_primary:
+            meta_bits.insert(0, "🔗 **partner** (pulled in by pair mode)")
         if r.get("category_raw") and r["category_raw"].lower() != r["topic"].lower():
             meta_bits.append(f"orig: `{r['category_raw']}`")
         st.caption(" · ".join(meta_bits))
@@ -395,18 +404,31 @@ if mode.startswith("📖") or mode == "Browse":
     )
 
     cols = st.columns([1, 1, 1, 1])
-    if cols[0].button("⟵ Prev", disabled=st.session_state.page <= 1):
+    if cols[0].button("⟵ Prev", disabled=st.session_state.page <= 1, use_container_width=True):
         st.session_state.page -= 1
-    if cols[1].button("Next ⟶", disabled=st.session_state.page >= total_pages):
+        st.rerun()
+    if cols[1].button("Next ⟶", disabled=st.session_state.page >= total_pages, use_container_width=True):
         st.session_state.page += 1
-    cols[2].number_input(
+        st.rerun()
+    # Jump: use a filter-scoped key so stale widget state never overrides `page`.
+    # (Reading the return value and comparing avoids the `value=`+`key=` footgun.)
+    jump_key = f"jump_{filter_sig}_{total_pages}"
+    jump_to = cols[2].number_input(
         "Jump to page", min_value=1, max_value=total_pages,
-        value=st.session_state.page, key="jump", label_visibility="collapsed",
-        on_change=lambda: setattr(st.session_state, "page", st.session_state.jump),
+        value=int(st.session_state.page),
+        key=jump_key,
+        label_visibility="collapsed",
     )
-    if cols[3].button("🎲 Random page"):
+    if jump_to != st.session_state.page:
+        st.session_state.page = int(jump_to)
+        st.rerun()
+    if cols[3].button("🎲 Random page", use_container_width=True, disabled=total_pages <= 1):
         import random
-        st.session_state.page = random.randint(1, total_pages)
+        # Pick a page that's NOT the current one, so "random" always moves you.
+        candidates = [p for p in range(1, total_pages + 1) if p != st.session_state.page]
+        if candidates:
+            st.session_state.page = random.choice(candidates)
+            st.rerun()
 
     # rate-limit gates
     now = time.time()
@@ -442,7 +464,7 @@ if mode.startswith("📖") or mode == "Browse":
             # Small divider so the student visually sees "a new pair begins"
             st.markdown(f"**— Pair #{r['number']} —**")
             prev_pair = pair_key
-        render_question(r, i)
+        render_question(r, i, is_primary=(id(r) in primary_ids))
 
 # =================================================================
 # MODE: FLASHCARDS
