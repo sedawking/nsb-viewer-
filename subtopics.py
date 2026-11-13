@@ -64,7 +64,9 @@ SUBTOPICS: dict[str, list[tuple[str, list[str]]]] = {
         ("Forces & Newton's Laws", [
             "force","newton","friction","gravity","gravitational","weight",
             "normal force","tension","free body","action","reaction","law of motion",
-            "net force","equilibrium"]),
+            "laws of motion","newton's law","newton's laws","newtons law","newtons laws",
+            "inertia","law of inertia","net force","equilibrium",
+            "vector quantity","scalar quantity"]),
         ("Energy, Work & Power", [
             "kinetic energy","potential energy","mechanical energy","work","power",
             "joule","watt","horsepower","conservation of energy","energy transfer"]),
@@ -83,13 +85,16 @@ SUBTOPICS: dict[str, list[tuple[str, list[str]]]] = {
             "melting point","boiling point","freezing point","sublimation",
             "condensation","evaporation","deposition"]),
         ("Electricity & Circuits", [
-            "electric","electricity","charge","voltage","voltmeter","current","ampere",
-            "ammeter","ohm","resistance","resistor","circuit","series","parallel",
-            "capacitor","capacitance","insulator","conductor","semiconductor","battery",
-            "coulomb"]),
+            "electric","electricity","voltage","voltmeter","current","ampere",
+            "ammeter","ohm","ohm's law","electrical resistance","resistor","circuit",
+            "series circuit","parallel circuit","capacitor","capacitance","insulator",
+            "conductor","semiconductor","battery","coulomb","electric charge",
+            "static electricity","electric field","electric potential"]),
         ("Magnetism & Electromagnetism", [
             "magnet","magnetic","magnetism","magnetic field","north pole","south pole",
-            "compass","electromagnet","electromagnetic","induction","solenoid"]),
+            "compass","electromagnet","electromagnetic","induction","solenoid",
+            "parallel wire","current-carrying wire","ampere's law","lorentz",
+            "lenz's law","faraday's law","right-hand rule"]),
         ("Waves & Sound", [
             "wave","wavelength","frequency","amplitude","hertz","transverse",
             "longitudinal","medium","sound","pitch","decibel","doppler","echo",
@@ -316,13 +321,19 @@ def tag_subtopics(topic: str, question: str, answer: str) -> list[str]:
 
     scored = []
     for name, pats in buckets:
-        s_stem = sum(w for p, w in pats if p.search(stem))
-        s_rest = sum(w for p, w in pats if p.search(rest))
-        score = s_stem * 3 + s_rest  # weight stem heavier, same as topic classifier
+        stem_hits = [(p, w) for p, w in pats if p.search(stem)]
+        rest_hits = [(p, w) for p, w in pats if p.search(rest)]
+        score = sum(w for _, w in stem_hits) * 3 + sum(w for _, w in rest_hits)
         if score > 0:
-            scored.append((score, name))
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return [n for _, n in scored]
+            # Specificity: the biggest word-count weight of any matched phrase.
+            # Ties on total score are broken in favour of the subtopic whose
+            # match is the most specific (e.g. "law of motion" beats "force").
+            best_specificity = max(
+                [w for _, w in stem_hits] + [w for _, w in rest_hits] + [1]
+            )
+            scored.append((score, best_specificity, name))
+    scored.sort(key=lambda x: (-x[0], -x[1], x[2]))
+    return [n for _, _, n in scored]
 
 
 def main():
