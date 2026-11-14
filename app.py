@@ -298,18 +298,50 @@ st.markdown("## NSB Middle School – Sample Questions")
 # Build a filter-signature so Flashcard/Quiz state resets when filters change
 _topics_sig = ",".join(sorted(selected_topics)) if selected_topics else "ALL"
 filter_sig = f"{_topics_sig}|{subtopic}|{kind}|{fmt}|{q}|{mode}|pair={pair_mode}"
+def _build_shuffled_order(filtered_list, pair_on: bool) -> list[int]:
+    """Return a SHUFFLED permutation of indices into `filtered_list`.
+    When pair mode is on, shuffles whole TOSS-UP/BONUS pairs as a unit so
+    partners stay adjacent. This is what Flashcards/Quiz open with so kids
+    never see the deck in natural (same-round-in-a-row) order."""
+    import random as _r
+    n = len(filtered_list)
+    if n == 0:
+        return []
+    if pair_on:
+        chunks: list[list[int]] = []
+        i = 0
+        while i < n:
+            cur = filtered_list[i]
+            if i + 1 < n:
+                nxt = filtered_list[i + 1]
+                if (cur["source"] == nxt["source"]
+                        and cur["number"] == nxt["number"]
+                        and cur["kind"] != nxt["kind"]):
+                    chunks.append([i, i + 1])
+                    i += 2
+                    continue
+            chunks.append([i])
+            i += 1
+        _r.shuffle(chunks)
+        return [j for ch in chunks for j in ch]
+    order = list(range(n))
+    _r.shuffle(order)
+    return order
+
+
 if filter_sig != st.session_state.fc_filter_key:
     st.session_state.fc_filter_key = filter_sig
     st.session_state.fc_idx = 0
     st.session_state.fc_flipped = False
     st.session_state.quiz_submitted = False
     st.session_state.quiz_user_answer = None
-    import random
-    st.session_state.fc_order = list(range(len(filtered)))
+    # Auto-shuffle on every filter/mode change so kids never see the same
+    # "first 10 from Sample Set 1 Round 1" over and over.
+    st.session_state.fc_order = _build_shuffled_order(filtered, pair_mode)
 
 # ensure order list is in sync with filter result size
 if len(st.session_state.fc_order) != len(filtered):
-    st.session_state.fc_order = list(range(len(filtered)))
+    st.session_state.fc_order = _build_shuffled_order(filtered, pair_mode)
 
 # ---------------------------- render ----------------------------
 # ---------------------------- helpers for flashcard/quiz ----------------------------
@@ -483,14 +515,15 @@ elif mode.startswith("🎴") or mode == "Flashcards":
 
         c_top = st.columns([2, 1, 1, 1])
         c_top[0].markdown(f"**Card {idx + 1} / {n}** · {r['topic']} · {r.get('subtopic','')}")
-        if c_top[1].button("🔀 Shuffle"):
-            _rand.shuffle(st.session_state.fc_order)
+        if c_top[1].button("🔀 Shuffle", help="Reshuffle the whole deck and start at card 1"):
+            st.session_state.fc_order = _build_shuffled_order(filtered, pair_mode)
             st.session_state.fc_idx = 0
             st.session_state.fc_flipped = False
             st.rerun()
-        if c_top[2].button("↩️ Restart"):
-            st.session_state.fc_order = list(range(n))
-            st.session_state.fc_idx = 0
+        if c_top[2].button("🎲 Random card", help="Jump to a random card without reshuffling",
+                           disabled=n <= 1):
+            candidates = [i for i in range(n) if i != idx]
+            st.session_state.fc_idx = _rand.choice(candidates)
             st.session_state.fc_flipped = False
             st.rerun()
         c_top[3].caption(f"{r.get('set_label','')} · {r.get('round_label','')} · {r['kind']} #{r['number']}")
@@ -597,38 +630,22 @@ elif mode.startswith("✏️") or mode == "Quiz":
                     st.markdown("\n".join(rows_md))
 
         ctl = st.columns([1, 1, 1])
-        if ctl[0].button("🔀 Shuffle deck"):
-            if pair_mode:
-                # Shuffle whole pairs so toss-up/bonus stay adjacent
-                chunks = []
-                i = 0
-                while i < n:
-                    cur = filtered[st.session_state.fc_order[i]] if False else filtered[i]
-                    if i + 1 < n:
-                        nxt = filtered[i + 1]
-                        if (cur["source"] == nxt["source"] and cur["number"] == nxt["number"]
-                                and cur["kind"] != nxt["kind"]):
-                            chunks.append([i, i + 1])
-                            i += 2
-                            continue
-                    chunks.append([i])
-                    i += 1
-                _rand.shuffle(chunks)
-                st.session_state.fc_order = [j for ch in chunks for j in ch]
-            else:
-                _rand.shuffle(st.session_state.fc_order)
+        if ctl[0].button("🔀 Shuffle deck", help="Reshuffle all questions and start at #1"):
+            st.session_state.fc_order = _build_shuffled_order(filtered, pair_mode)
             st.session_state.fc_idx = 0
             st.session_state.quiz_submitted = False
             st.session_state.quiz_user_answer = None
             st.rerun()
-        if ctl[1].button("↺ Reset score"):
+        if ctl[1].button("🎲 Random question",
+                         help="Jump to a random question without reshuffling",
+                         disabled=n <= 1):
+            candidates = [i for i in range(n) if i != idx]
+            st.session_state.fc_idx = _rand.choice(candidates)
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_user_answer = None
+            st.rerun()
+        if ctl[2].button("↺ Reset score"):
             st.session_state.quiz_history = []
-            st.session_state.quiz_submitted = False
-            st.session_state.quiz_user_answer = None
-            st.rerun()
-        if ctl[2].button("↩️ Restart deck"):
-            st.session_state.fc_order = list(range(n))
-            st.session_state.fc_idx = 0
             st.session_state.quiz_submitted = False
             st.session_state.quiz_user_answer = None
             st.rerun()
